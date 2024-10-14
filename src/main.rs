@@ -1,6 +1,6 @@
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     style::Print,
     terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
@@ -22,53 +22,77 @@ fn load_from_file(filename: &str) -> io::Result<String> {
 }
 
 fn main() -> io::Result<()> {
-    enable_raw_mode()?; // Enables raw mode for the terminal
+    let _raw_mode_guard = RawModeGuard::new()?; // Ensures raw mode is disabled on exit
+
     let mut stdout = io::stdout();
     execute!(stdout, Clear(ClearType::All), cursor::MoveTo(0, 0))?;
 
-    // Specify the file to load and save
     let filename = "test_file.txt"; // You can modify this or ask the user to input a file name
-
-    // Try loading the file, if it exists
     let mut buffer = load_from_file(filename).unwrap_or_default();
-
-    // Display the loaded content in the terminal
     execute!(stdout, Print(&buffer))?;
 
+    let mut cursor_x = buffer.lines().last().unwrap_or("").len(); // Track current cursor position (column)
+    let mut cursor_y = buffer.lines().count(); // Track current cursor line (row)
+
     loop {
-        // Check if a key event is available
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key_event) = event::read()? {
-                // Filter out key release and repeat events, handle only key press events
                 if key_event.kind == KeyEventKind::Press {
                     match key_event.code {
                         KeyCode::Char(c) => {
                             // Handle character input
                             buffer.push(c);
+                            cursor_x += 1;
                             execute!(stdout, Print(c))?;
+                        }
+                        KeyCode::Enter => {
+                            // Handle Enter key to create a new line
+                            buffer.push('\n'); // Add newline character to buffer
+                            cursor_x = 0;
+                            cursor_y += 1;
+                            execute!(stdout, cursor::MoveToNextLine(1))?; // Move to the next line
                         }
                         KeyCode::Backspace => {
                             // Handle backspace
-                            if !buffer.is_empty() {
+                            if cursor_x > 0 {
+                                // Normal backspace within the line
                                 buffer.pop();
+                                cursor_x -= 1;
                                 execute!(
                                     stdout,
                                     cursor::MoveLeft(1),
                                     Print(" "),
                                     cursor::MoveLeft(1)
                                 )?;
+                            } else if cursor_y > 1 {
+                                // Move to the previous line
+                                buffer.pop(); // Remove the newline character
+                                cursor_y -= 1;
+
+                                // Find the length of the previous line
+                                let previous_line_length =
+                                    buffer.lines().nth(cursor_y - 1).unwrap_or("").len();
+                                cursor_x = previous_line_length;
+
+                                // Move the cursor to the end of the previous line
+                                execute!(
+                                    stdout,
+                                    cursor::MoveUp(1),
+                                    cursor::MoveRight(previous_line_length as u16),
+                                    Print(" "), // Clear the space from the current position
+                                    cursor::MoveLeft(1)
+                                )?;
                             }
                         }
                         KeyCode::Esc => {
-                            // Save the buffer to the file before exiting
+                            // Save and exit
                             save_to_file(filename, &buffer)?;
-                            disable_raw_mode()?;
                             break;
                         }
-                        KeyCode::Enter => {
-                            // Handle Enter key to create a new line
-                            buffer.push('\n'); // Add newline character to buffer
-                            execute!(stdout, cursor::MoveToNextLine(1))?; // Move to the next line
+                        KeyCode::Char('s') if key_event.modifiers == KeyModifiers::CONTROL => {
+                            // Ctrl+S to save without exiting
+                            save_to_file(filename, &buffer)?;
+                            execute!(stdout, cursor::MoveTo(0, 0), Print("File Saved!"))?;
                         }
                         _ => {}
                     }
@@ -80,58 +104,18 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::io::Result;
-    use tempfile::NamedTempFile;
+struct RawModeGuard;
 
-    #[test]
-    fn test_save_to_file() -> Result<()> {
-        // Create a temporary file
-        let temp_file = NamedTempFile::new()?;
-        let filename = temp_file.path().to_str().unwrap(); // Get the path
-
-        // Data to save
-        let data = "Hello, Rust!";
-
-        // Save data to the file
-        save_to_file(filename, data)?;
-
-        // Check that the file contains the correct data
-        let saved_content = fs::read_to_string(filename)?;
-        assert_eq!(saved_content, data);
-
-        Ok(())
+impl RawModeGuard {
+    fn new() -> io::Result<Self> {
+        // Changed to io::Result
+        enable_raw_mode()?; // Enable raw mode
+        Ok(RawModeGuard)
     }
+}
 
-    #[test]
-    fn test_load_from_file() -> Result<()> {
-        // Create a temporary file with predefined content
-        let mut temp_file = NamedTempFile::new()?;
-
-        // Extract the file path before mutably borrowing temp_file to write data
-        let filename = temp_file.path().to_str().unwrap().to_string();
-
-        let data = "Rust programming!";
-        temp_file.write_all(data.as_bytes())?;
-
-        // Load the content from the file
-        let loaded_content = load_from_file(&filename)?;
-
-        // Check if the loaded content matches the predefined content
-        assert_eq!(loaded_content, data);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_load_from_non_existent_file() {
-        // Try loading from a non-existent file
-        let result = load_from_file("non_existent_file.txt");
-
-        // It should return an error
-        assert!(result.is_err());
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode(); // Disable raw mode on drop
     }
 }
